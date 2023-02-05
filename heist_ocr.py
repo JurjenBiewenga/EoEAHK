@@ -3,11 +3,15 @@ import numpy as nm
 from PIL import ImageGrab, Image
 from os.path import join
 from sys import argv
+from google.cloud import datastore
+import time
+
 
 gem_types = ["phantasmal", "divergent", "anomalous"]
 gem_url = "https://poe.ninja/api/data/itemoverview?league={0}&type=SkillGem"
 pytesseract.pytesseract.tesseract_cmd = "Tesseract-OCR\\tesseract"
 
+datastore_client = datastore.Client("test-4c3ce")
 
 def load_gem_names(gem_names):
     words = []
@@ -43,6 +47,34 @@ def extract_gem_info(lines, gem_names):
                         "chaos": l["chaosValue"],
                         "div": l["divineValue"],
                     }
+    return results
+
+def extract_gem(gem_names):
+    results = {}
+    for gem_name in gem_names:
+        results[gem_name] = []
+
+        query = datastore_client.query(kind='Heist')
+        query = query.add_filter('GemName', '=', gem_name)
+        query = query.add_filter('Claimed', '=', False)
+
+        doc = list(query.fetch())
+
+        # doc = db.collection(u'heist').where(u'GemName', u'==', gem_name).stream()
+        for l in doc:
+            results[gem_name].append(l.get('User'))
+            # if results[gem_name].get(l.get("gemLevel")):
+            #     results[gem_name][l.get("gemLevel")]["chaos"] = min(
+            #         results[gem_name][l.get("gemLevel")]["chaos"], l.get("chaosValue")
+            #     )
+            #     results[gem_name][l.get("gemLevel")]["div"] = min(
+            #         results[gem_name][l.get("gemLevel")]["div"], l.get("divineValue")
+            #     )
+            # else:
+            #     results[gem_name][l.get("gemLevel")] = {
+            #         "chaos": l["chaosValue"],
+            #         "div": l["divineValue"],
+            #     }
     return results
 
 
@@ -96,32 +128,32 @@ def get_gem_name():
     return nm.unique([extract_gem_name(gem_str, gems) for gem_str in split_list])
 
 
-def get_gem_price(league, min_level=3, max_level=19):
-    data = get_gem_data(league)
-    gem_info = extract_gem_info(data, get_gem_name())
+def get_gem_price():
+    # data = get_gem_data(league)
+    gem_info = extract_gem(get_gem_name())
     results = {}
     for name, d in gem_info.items():
-        results[name] = {}
-        for level, data in d.items():
-            if level in range(min_level, max_level):
-                results[name][level] = data
+        if len(d) > 0:
+            results[name] = d
+        # for level, data in d.items():
+        #     if level in range(min_level, max_level):
+        #         results[name][level] = data
     return results
 
 def print_output():
-    if len(sys.argv) < 2:
-        print("League argument not provided, exiting now")
-        sys.exit(1)
-    price_info = get_gem_price(sys.argv[1])
+    start = time.time()
+    price_info = get_gem_price()
     if not len(price_info):
         print("Trouble parsing gem data due to OCR technical difficulties, sorry! (try holding alt and trying again)")
         sys.exit(1)
-    for gem, level_dict in price_info.items():
-        if len(level_dict.keys()) == 0:
-            print("Not enough poe ninja data, sorry")
-        else:
-            min_level = min(level_dict.keys())
-            chaos_value = level_dict[min_level]["chaos"]
-            div_value = level_dict[min_level]["div"]
-            print(f"{gem} (level {min_level}) - chaos: {chaos_value}, div: {div_value}")
+    for gem, users in price_info.items():
+        print(f"{gem} ({', '.join(users)})")
+        # if len(level_dict.keys()) == 0:
+        #     print("Not enough poe ninja data, sorry")
+        # else:
+        #     min_level = min(level_dict.keys())
+        #     chaos_value = level_dict[min_level]["chaos"]
+        #     div_value = level_dict[min_level]["div"]
+        #     print(f"{gem} (level {min_level}) - chaos: {chaos_value}, div: {div_value}")
 
 print_output()
