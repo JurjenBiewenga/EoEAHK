@@ -3,4 +3,6 @@ numpy
 pytesseract
 requests
 opencv-python
-google-cloud-datastore
+google-cloud-firestore
+python-levenshtein
+pywin32

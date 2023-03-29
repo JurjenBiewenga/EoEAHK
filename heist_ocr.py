@@ -3,157 +3,162 @@ import numpy as nm
 from PIL import ImageGrab, Image
 from os.path import join
 from sys import argv
-from google.cloud import datastore
-import time
-
+from google.cloud import firestore
+from Levenshtein import distance
+from win32gui import FindWindow, GetWindowRect
 
 gem_types = ["phantasmal", "divergent", "anomalous"]
+item_types = ["replica"]
+
 gem_url = "https://poe.ninja/api/data/itemoverview?league={0}&type=SkillGem"
 pytesseract.pytesseract.tesseract_cmd = "Tesseract-OCR\\tesseract"
 
-datastore_client = datastore.Client("test-4c3ce")
+firestore_client = firestore.Client("east-oriath-exiles")
 
-def load_gem_names(gem_names):
-    words = []
-    for n in gem_names:
-        for s in n.split(" "):
-            words.append(s.rstrip().lower())
-    return words
-
-
-def get_gem_data(league="Sanctum"):
-    r = requests.get(gem_url.format(league))
-    if r.status_code != 200:
-        print("Request to Poe.Ninja failed, most likely invalid league provided")
-        sys.exit(1)
-    return json.loads(r.text)["lines"]
-
-
-def extract_gem_info(lines, gem_names):
-    results = {}
-    for gem_name in gem_names:
-        results[gem_name] = {}
-        for l in lines:
-            if l["name"].lower() == gem_name:
-                if results[gem_name].get(l.get("gemLevel")):
-                    results[gem_name][l.get("gemLevel")]["chaos"] = min(
-                        results[gem_name][l.get("gemLevel")]["chaos"], l.get("chaosValue")
-                    )
-                    results[gem_name][l.get("gemLevel")]["div"] = min(
-                        results[gem_name][l.get("gemLevel")]["div"], l.get("divineValue")
-                    )
-                else:
-                    results[gem_name][l.get("gemLevel")] = {
-                        "chaos": l["chaosValue"],
-                        "div": l["divineValue"],
-                    }
-    return results
-
-def extract_gem(gem_names):
+def extract_gem(isHeist, gem_names):
     results = {}
     for gem_name in gem_names:
         results[gem_name] = []
 
-        query = datastore_client.query(kind='Heist')
-        query = query.add_filter('GemName', '=', gem_name)
-        query = query.add_filter('Claimed', '=', False)
+        if(isHeist):
+            query = firestore_client.collection('Heist').where('itemName', '==', gem_name).where('status', '==', 'open').order_by("timestamp")
 
-        doc = list(query.fetch())
+            for l in query.stream():
+                reward = l.get('reward')
+                results[gem_name].append(l.get('username') + ": " + (reward != "" if reward else "No Reward"))
+        else:
+            query = firestore_client.collection('Lab').where('enchant', '==', gem_name).where('status', '==', 'open').order_by("timestamp")
 
-        # doc = db.collection(u'heist').where(u'GemName', u'==', gem_name).stream()
-        for l in doc:
-            results[gem_name].append(l.get('User'))
-            # if results[gem_name].get(l.get("gemLevel")):
-            #     results[gem_name][l.get("gemLevel")]["chaos"] = min(
-            #         results[gem_name][l.get("gemLevel")]["chaos"], l.get("chaosValue")
-            #     )
-            #     results[gem_name][l.get("gemLevel")]["div"] = min(
-            #         results[gem_name][l.get("gemLevel")]["div"], l.get("divineValue")
-            #     )
-            # else:
-            #     results[gem_name][l.get("gemLevel")] = {
-            #         "chaos": l["chaosValue"],
-            #         "div": l["divineValue"],
-            #     }
+            for l in query.stream():
+                base = l.get('itemBase')
+                reward = l.get('reward')
+                results[gem_name].append(l.get('username') + ": " + base + " : " + (reward != "" if reward else "No Reward"))
+    
     return results
 
-
-def contains_gem_type(s):
-    s = s.lower()
-    for gem in gem_types:
-        if gem in s:
-            return True
-    return False
-
-
-def is_alpha_or_quote(word):
-    return all([x.isalpha() or x == "'" for x in word])
-
-
-def extract_gem_name(l, gem_names):
-    pos = -1
-    all_gem_words = []
-    for i, word in enumerate(l):
-        if word in gem_types:
-            pos = i
-    prefix = l[pos]
-    result = l[pos + 1]
-    pos += 1
-    while result not in gem_names and pos + 1 < len(l):
-        pos += 1
-        result += " " + l[pos]
-    if l[pos] == "mark" and "'" not in l[pos - 1]: # case handling for marks
-        result = result.replace("s mark", "'s mark")
-    if result not in gem_names:
-        print("Trouble parsing gem data due to OCR technical difficulties, sorry! (try holding alt and trying again)")
-        sys.exit(1)
-    return prefix + " " + result
-
-
 def get_gem_name():
-    cap = ImageGrab.grab()
-    _, img = cv2.threshold(nm.array(cap), 135, 255, cv2.THRESH_BINARY)
+    window_handle = FindWindow(None, "Path Of Exile")
+    window_rect   = GetWindowRect(window_handle)
+    cap = ImageGrab.grab(bbox=window_rect, all_screens=True)
+    # cap = ImageGrab.grab(all_screens=False)
+    _, img = cv2.threshold(nm.array(cap), 135, 255, cv2.THRESH_BINARY) 
+
+    width = 1800; 
+    height = int(img.shape[0] / (img.shape[1] / width))
+    dim = (width, height)
+    
+    img = cv2.resize(nm.array(img), dim, interpolation=cv2.INTER_AREA)
     tesstr = pytesseract.image_to_string(nm.array(img), lang="eng", config="heist")
-    gem_name = [x.lower() for x in tesstr.split("\n") if contains_gem_type(x)]
-    split_list = []
-    for name in gem_name:
-        temp_list = []
-        for word in name.split(" "):
-            if "(" not in word and ")" not in word and is_alpha_or_quote(word):
-                temp_list.append(word)
-        split_list.append(temp_list)
-    gems = []
+
+    split = [x.lower() for x in tesstr.split("\n")]
+
     with open(join(pathlib.Path(__file__).parent.resolve(), "gem_names/gem_names.txt"), "r") as f:
-        gems = [x.lower().rstrip() for x in f.readlines()]
-    return nm.unique([extract_gem_name(gem_str, gems) for gem_str in split_list])
+        gem_names = [x.lower().rstrip() for x in f.readlines()]
+    with open(join(pathlib.Path(__file__).parent.resolve(), "item_names/item_names.txt"), "r") as f:
+        item_names = [x.lower().rstrip() for x in f.readlines()]
+    with open(join(pathlib.Path(__file__).parent.resolve(), "lab_names/lab_names.txt"), "r") as f:
+        lab_names = [x.lower().rstrip() for x in f.readlines()]
+
+    heist = False
+    items = []
+    for s in split:
+        names = FindNames(gem_names, s, gem_types)
+        if names is not None and len(names) != 0:
+            items.extend(names)
+            heist = True
+    for s in split:
+        names = FindNames(item_names, s, item_types)
+        if names is not None and len(names) != 0:
+            items.extend(names)
+            heist = True
+    if(len(items) == 0):
+        for s in split:
+            names = FindLabNames(lab_names, s)
+            if names is not None and len(names) != 0:
+                items.extend(names)
+                heist = False
+
+    return (heist, nm.unique(items))
+
+def FindLabNames(names, s):
+    gems = []
+    index = -1
+
+    index = 0
+    nextIndex = 0
+    nextIndex = s.find(" ", index)
+    
+    while nextIndex < len(s):
+        nextIndex = s.find(" ", index)
+        if nextIndex == -1:
+            break
+        
+        if True:
+            name = FindLabTypes(names, s, index)
+            if name is not None:
+                gems.append(name)
+        index = nextIndex + 1
+    return gems
+
+def FindNames(names, s, types):
+    gems = []
+    index = -1
+
+    index = 0
+    nextIndex = 0
+    nextIndex = s.find(" ", index)
+    
+    while nextIndex < len(s):
+        nextIndex = s.find(" ", index)
+        if nextIndex == -1:
+            break
+        
+        word = s[index:nextIndex]
+        if any((type for type in types if distance(type, word) < 3)):
+            name = FindTypes(names, s, index, word)
+            if name is not None:
+                gems.append(name)
+        index = nextIndex + 1
+    return gems
+
+def FindTypes(gem_names, s, index, type):
+    nextIndex = s.index(" ", index)
+    index = nextIndex + 1
+    while nextIndex < len(s):
+        nextIndex = s.find(" ", nextIndex + 1)
+        if nextIndex == -1:
+            nextIndex = len(s)
+
+        gem_name = next((gem.lower() for gem in gem_names if distance(s[index:nextIndex], gem) < 3), None)
+        if gem_name is not None:
+            return type + " " + gem_name
+        
+def FindLabTypes(gem_names, s, index):
+    nextIndex = s.index(" ", index)
+    while nextIndex < len(s):
+        nextIndex = s.find(" ", nextIndex + 1)
+        if nextIndex == -1:
+            nextIndex = len(s)
+
+        gem_name = next((gem.lower() for gem in gem_names if distance(s[index:nextIndex], gem) < 3), None)
+        if gem_name is not None:
+            return gem_name
 
 
-def get_gem_price():
-    # data = get_gem_data(league)
-    gem_info = extract_gem(get_gem_name())
+def get_gem_info():
+    isHeist, names = get_gem_name()
+    gem_info = extract_gem(isHeist, names)
     results = {}
     for name, d in gem_info.items():
-        if len(d) > 0:
-            results[name] = d
-        # for level, data in d.items():
-        #     if level in range(min_level, max_level):
-        #         results[name][level] = data
+        results[name] = d
     return results
 
 def print_output():
-    start = time.time()
-    price_info = get_gem_price()
+    price_info = get_gem_info()
     if not len(price_info):
         print("Trouble parsing gem data due to OCR technical difficulties, sorry! (try holding alt and trying again)")
         sys.exit(1)
     for gem, users in price_info.items():
         print(f"{gem} ({', '.join(users)})")
-        # if len(level_dict.keys()) == 0:
-        #     print("Not enough poe ninja data, sorry")
-        # else:
-        #     min_level = min(level_dict.keys())
-        #     chaos_value = level_dict[min_level]["chaos"]
-        #     div_value = level_dict[min_level]["div"]
-        #     print(f"{gem} (level {min_level}) - chaos: {chaos_value}, div: {div_value}")
 
 print_output()

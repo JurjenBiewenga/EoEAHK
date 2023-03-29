@@ -11,7 +11,7 @@
             "program": "heist_ocr.py",
             "console": "integratedTerminal",
             "justMyCode": true,
-            "args": ["Sanctum"]
+            "args": []
         }
     ]
 }
