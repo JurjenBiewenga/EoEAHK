@@ -3,17 +3,17 @@ import numpy as nm
 from PIL import ImageGrab, Image
 from os.path import join
 from sys import argv
-from google.cloud import firestore
+# from google.cloud import firestore
 from Levenshtein import distance
 from win32gui import FindWindow, GetWindowRect
+import http.client
+import json
 
 gem_types = ["phantasmal", "divergent", "anomalous"]
 item_types = ["replica"]
 
-gem_url = "https://poe.ninja/api/data/itemoverview?league={0}&type=SkillGem"
 pytesseract.pytesseract.tesseract_cmd = "Tesseract-OCR\\tesseract"
 
-firestore_client = firestore.Client("east-oriath-exiles")
 
 def extract_gem(isHeist, gem_names):
     results = {}
@@ -21,20 +21,96 @@ def extract_gem(isHeist, gem_names):
         results[gem_name] = []
 
         if(isHeist):
-            query = firestore_client.collection('Heist').where('itemName', '==', gem_name).where('status', '==', 'open').order_by("timestamp")
 
-            for l in query.stream():
-                reward = l.get('reward')
-                results[gem_name].append(l.get('username') + ": " + (reward != "" if reward else "No Reward"))
+            for l in run_query_heist(gem_name):
+                reward = l["reward"];
+                results[gem_name].append(l["username"] + ": " + (reward != "" if reward else "No Reward"))
         else:
-            query = firestore_client.collection('Lab').where('enchant', '==', gem_name).where('status', '==', 'open').order_by("timestamp")
-
-            for l in query.stream():
-                base = l.get('itemBase')
-                reward = l.get('reward')
-                results[gem_name].append(l.get('username') + ": " + base + " : " + (reward != "" if reward else "No Reward"))
+            for l in run_query_lab(gem_name):
+                base = l["itemBase"]
+                reward = l["reward"]
+                results[gem_name].append(l["username"] + ": " + base + " : " + (reward != "" if reward else "No Reward"))
     
     return results
+
+def run_query_heist(itemName):
+    dict = run_query(itemName, "Heist")
+    matchingItems = []
+    for item in dict:
+        try:
+            fields = item["document"]["fields"]
+            matchingItems.append({"reward": fields["reward"]["stringValue"], "username": fields["username"]["stringValue"]})
+        except:
+            continue
+
+    return matchingItems
+
+def run_query_lab(itemName):
+    dict = run_query(itemName, "Lab")
+    matchingItems = []
+    for item in dict:
+        try:
+            fields = item["document"]["fields"]
+            matchingItems.append({"reward": fields["reward"]["stringValue"], "username": fields["username"]["stringValue"], "itemBase": fields["itemBase"]["stringValue"]})
+        except:
+            continue
+
+    return matchingItems
+
+def run_query(itemName, collection):
+    conn = http.client.HTTPSConnection("firestore.googleapis.com")
+    payload = json.dumps({
+    "structuredQuery": {
+        "where": {
+        "compositeFilter": {
+            "op": "AND",
+            "filters": [
+            {
+                "fieldFilter": {
+                "field": {
+                    "fieldPath": "itemName"
+                },
+                "op": "EQUAL",
+                "value": {
+                    "stringValue": itemName
+                }
+                }
+            },
+            {
+                "fieldFilter": {
+                "field": {
+                    "fieldPath": "status"
+                },
+                "op": "EQUAL",
+                "value": {
+                    "stringValue": "open"
+                }
+                }
+            }
+            ]
+        }
+        },
+        "from": [
+        {
+            "collectionId": collection
+        }
+        ],
+        "orderBy": {
+        "field": {
+            "fieldPath": "timestamp"
+        },
+        "direction": "ASCENDING"
+        }
+    }
+    })
+    headers = {
+    'Content-Type': 'application/json'
+    }
+    conn.request("POST", "/v1/projects/east-oriath-exiles/databases/(default)/documents/:runQuery", payload, headers)
+    res = conn.getresponse()
+    data = res.read().decode("utf-8")
+    dict = json.loads(data)
+    return dict
 
 def get_gem_name():
     window_handle = FindWindow(None, "Path Of Exile")
